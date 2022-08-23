@@ -1,0 +1,132 @@
+#Make sure that the receptor object is in the first position
+#And rename docked fragments table as t_frag
+
+errorAction=3
+GRAPHICS.hbondMinStrength=1.5
+
+#Adds index numbers as the second column, display each fragment as an object with the corresponding index number in its name
+delete t_frag.INX
+add column t_frag Count(1 Nof(t_frag)+1-1) index=2 name="INX" delete comment="row numbers"
+prot_acc_all=a_1.a//HA
+prot_don_all=a_1.1//HD
+for i=1,Nof(t_frag)
+  parrayToMol t_frag.mol [i]
+  rename a_ "frag_"+String(i)
+  convert3Dto3D a_ yes no yes
+endfor
+frag_acc_all=a_frag*.//HA
+frag_don_all=a_frag*.//HD
+
+#Deletes previously generated variables. Used when running code multiple times
+delete prot_don_neighb
+delete tt
+
+group table t_prot {""} "type" {""} "prot" {0} "contacts" {""} "frag" {""} "select_frag"
+
+
+#make list of hbonds from frag to prot
+prot_don_neighb=Sphere(frag_acc_all prot_don_all 3.4)
+for i=1,Nof(prot_don_neighb)
+  delete hbondpairs
+  make hbond prot_don_neighb[i] a_frag*.
+  if (Nof(hbondpairs) > 0) then
+    tt=Table(hbondpairs distance)
+    add t_prot 1
+    t_prot.type[1]="donor"
+    t_prot.prot[1]=tt.atom1[1]
+    t_prot.contacts[1]=Nof(tt)
+    t_prot.frag[1]=Sum(tt.atom2,",")
+    delete tt
+  endif
+endfor
+
+#make list of hbonds from prot to frag
+prot_acc_neighb=Sphere(frag_don_all prot_acc_all 3.4)
+for i=1,Nof(prot_acc_neighb)
+  make hbond prot_acc_neighb[i] a_frag*.
+  if (Nof(hbondpairs) > 0) then
+    tt=Table(hbondpairs distance)
+    add t_prot 1
+    t_prot.type[1]="acceptor"
+    t_prot.prot[1]=tt.atom1[1]
+    t_prot.contacts[1]=Nof(tt)
+    t_prot.frag[1]=Sum(tt.atom2,",")
+    delete tt
+  endif
+  delete hbondpairs
+endfor
+
+#make list of hydrophobic interactions
+#Looks at hydrophobic atoms excluding hydrogen
+prot_hphob=Sphere((a_frag*.//H & a_frag*.//!h*) (a_1.1//H & a_1.1//!h*) 3.7)
+for i=1,Nof(prot_hphob)
+  frag_hphob=Sphere(prot_hphob[i] a_frag*.//H 4.) & a_frag*.//!h*
+  add t_prot 1
+  t_prot.type[1]="hydrophobic"
+  t_prot.prot[1]=String(prot_hphob[i])
+  t_prot.contacts[1]=Nof(frag_hphob)
+  t_prot.frag[1]=String(frag_hphob)
+endfor
+
+#Remove empty rows
+t_prot=t_prot.prot!=""
+
+#Must run the two lines below separately, 10 is the default value, select number so that only ~20 rows remain
+min_hbond=Ask("minimum number of H-bonds to define a H-bond cluster?",10)
+min_hphob=Ask("minimum number of contacts to define a hydrophobic cluster?",10)
+
+#Remove rows with contact number less than threshold
+t_prot=(t_prot.type=="hydrophobic" & t_prot.contacts >= min_hphob) | (t_prot.type!="hydrophobic" & t_prot.contacts >= min_hbond)
+
+
+#make list of frags and count
+delete t_frag.hbond
+delete t_frag.hphob
+add column t_frag Iarray(Nof(t_frag),0) index=3 name="hbond" delete comment="make int column"
+add column t_frag Iarray(Nof(t_frag),0) index=3 name="hphob" delete comment="make int column"
+for i=1,Nof(t_frag)
+  t_frag.hbond[i]=Nof(t_prot.type!="hydrophobic" & t_prot.frag~"*frag_"+String(t_frag.INX[i])+".*")
+  t_frag.hphob[i]=Nof(t_prot.type=="hydrophobic" & t_prot.frag~"*frag_"+String(t_frag.INX[i])+".*")
+endfor
+
+
+#select fragments with the most hbonds, prioritizing larger fragments to minimize the total number of fragments selected
+sort reverse t_frag.hbond reverse t_frag.nof_Atoms
+n=1
+while (Nof(t_prot.select_frag =="" & t_prot.type!="hydrophobic")>0)
+  s="frag_"+String(t_frag.INX[n])
+  make hbond a_1.1//* a_$s.
+  tt=Table(hbondpairs distance)
+  l_keep=yes #keep fragment that makes only hbonds with the most visited sites
+  for i=1,Nof(tt)
+    if (Nof(t_prot.prot==tt.atom1[i])==0) l_keep=no
+  endfor
+  if (l_keep == yes) then # identify all critical sites visited by fragment
+    for i=1,Nof(t_prot)
+      if (t_prot.frag[i]~"*"+s+".*" & t_prot.select_frag[i]=="") t_prot.select_frag[i]=s
+    endfor
+  endif
+  n+=1
+  delete hbondpairs
+  delete tt
+endwhile
+
+#add fragments to satisfy missed hydrophobic clusters
+#select fragments with the most hydrophobic interactions, prioritizing larger fragments to minimize the total number of fragments selected
+sort reverse t_frag.hphob reverse t_frag.nof_Atoms
+n=1
+#Continue looping while there are hydrophobic rows with the select frag column empty 
+while (Nof(t_prot.select_frag =="" & t_prot.type=="hydrophobic")>0)
+  s="frag_"+String(t_frag.INX[n])
+  for i=1,Nof(t_prot)
+    if (t_prot.frag[i]~"*"+s+".*" & t_prot.select_frag[i]=="") t_prot.select_frag[i]=s
+  endfor
+n+=1
+endwhile
+
+
+#Displays selected fragments 
+for i=1,Nof(t_prot)
+  s=t_prot.select_frag[i]
+  ds xsticks a_$s.
+endfor
